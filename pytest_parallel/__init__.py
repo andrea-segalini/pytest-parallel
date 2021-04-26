@@ -9,7 +9,7 @@ import platform
 import threading
 import multiprocessing
 from tblib import pickling_support
-from multiprocessing import Manager, Process
+from multiprocessing import current_process, Manager, Process
 
 # In Python 3.8 and later, the default on macOS is spawn.
 # We force forking behavior at the expense of safety.
@@ -62,12 +62,41 @@ def process_with_threads(config, queue, session, tests_per_worker, errors):
     # so we know we are running as a worker.
     config.parallel_worker = True
 
-    threads = []
-    for _ in range(tests_per_worker):
-        thread = ThreadWorker(queue, session, errors)
-        thread.start()
-        threads.append(thread)
-    [t.join() for t in threads]
+    if tests_per_worker == 1:
+        worker_run(current_process().name, queue, session, errors)
+    else:
+        threads = []
+        for _ in range(tests_per_worker):
+            thread = ThreadWorker(queue, session, errors)
+            thread.start()
+            threads.append(thread)
+        [t.join() for t in threads]
+
+
+def worker_run(name, queue, session, errors):
+    pickling_support.install()
+    while True:
+        try:
+            index = queue.get()
+            if index == 'stop':
+                queue.task_done()
+                break
+        except ConnectionRefusedError:
+            time.sleep(.1)
+            continue
+        item = session.items[index]
+        try:
+            run_test(session, item, None)
+        except BaseException:
+            import pickle
+            import sys
+
+            errors.put((name, pickle.dumps(sys.exc_info())))
+        finally:
+            try:
+                queue.task_done()
+            except ConnectionRefusedError:
+                pass
 
 
 class ThreadWorker(threading.Thread):
@@ -78,29 +107,7 @@ class ThreadWorker(threading.Thread):
         self.errors = errors
 
     def run(self):
-        pickling_support.install()
-        while True:
-            try:
-                index = self.queue.get()
-                if index == 'stop':
-                    self.queue.task_done()
-                    break
-            except ConnectionRefusedError:
-                time.sleep(.1)
-                continue
-            item = self.session.items[index]
-            try:
-                run_test(self.session, item, None)
-            except BaseException:
-                import pickle
-                import sys
-
-                self.errors.put((self.name, pickle.dumps(sys.exc_info())))
-            finally:
-                try:
-                    self.queue.task_done()
-                except ConnectionRefusedError:
-                    pass
+        worker_run(self.name, self.queue, self.session, self.errors)
 
 
 @pytest.mark.trylast

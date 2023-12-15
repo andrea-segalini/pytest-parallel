@@ -315,7 +315,6 @@ class ParallelRunner(object):
 
         [p.join() for p in processes]
 
-        queue.join()
         wait_for_responses_processor()
 
         if not errors.empty():

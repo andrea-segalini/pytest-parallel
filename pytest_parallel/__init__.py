@@ -62,6 +62,10 @@ def process_with_threads(config, queue, session, tests_per_worker, errors):
     # so we know we are running as a worker.
     config.parallel_worker = True
 
+    # Unregister "terminalreporter" to prevent the workers from outputting
+    # anything. The main thread is in charge of that.
+    config.pluginmanager.unregister(name="terminalreporter")
+
     if tests_per_worker == 1:
         worker_run(current_process().name, queue, session, errors)
     else:
@@ -201,12 +205,6 @@ class ParallelRunner(object):
         self._config = config
         self._manager = Manager()
         self._log = py.log.Producer('pytest-parallel')
-
-        reporter = config.pluginmanager.getplugin('terminalreporter')
-
-        # prevent mangling the output
-        reporter.showfspath = False
-        reporter._show_progress_info = False
 
         # get the number of workers
         workers = parse_config(config, 'workers')

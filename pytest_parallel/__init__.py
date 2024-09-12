@@ -246,6 +246,13 @@ class ParallelRunner(object):
 
         if session.config.option.collectonly:
             return True
+        
+        # Override the number of workers based on the number of tests being
+        # executed if it is less than what was originally configured. This
+        # is a speculative fix to avoid pytest from hanging when more workers
+        # are spawned than is needed by the number of tests being executed.
+        if self.workers > len(session.items):
+            self.workers = len(session.items)
 
         # get the number of tests per worker
         tests_per_worker = parse_config(session.config, 'tests_per_worker')

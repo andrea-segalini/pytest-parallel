@@ -62,19 +62,21 @@ def process_with_threads(config, queue, session, tests_per_worker, errors):
     # so we know we are running as a worker.
     config.parallel_worker = True
 
-    # Unregister "terminalreporter" to prevent the workers from outputting
-    # anything. The main thread is in charge of that.
-    config.pluginmanager.unregister(name="terminalreporter")
+    with open(os.devnull, "w") as devnull:
+        # Replace the TerminalWriter of terminalreporter with one that outputs
+        # to /dev/null.
+        reporter = config.pluginmanager.get_plugin("terminalreporter")
+        reporter._tw = _pytest.config.create_terminal_writer(config, devnull)
 
-    if tests_per_worker == 1:
-        worker_run(current_process().name, queue, session, errors)
-    else:
-        threads = []
-        for _ in range(tests_per_worker):
-            thread = ThreadWorker(queue, session, errors)
-            thread.start()
-            threads.append(thread)
-        [t.join() for t in threads]
+        if tests_per_worker == 1:
+            worker_run(current_process().name, queue, session, errors)
+        else:
+            threads = []
+            for _ in range(tests_per_worker):
+                thread = ThreadWorker(queue, session, errors)
+                thread.start()
+                threads.append(thread)
+            [t.join() for t in threads]
 
 
 def worker_run(name, queue, session, errors):

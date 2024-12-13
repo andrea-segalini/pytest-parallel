@@ -56,28 +56,31 @@ def run_test(session, item, nextitem):
         raise session.Interrupted(session.shouldstop)
 
 
-def process_with_threads(config, queue, session, tests_per_worker, errors):
+def process_with_threads(config, queue, session, tests_per_worker, errors, i):
     # This function will be called from subprocesses, forked from the main
     # pytest process. First thing we need to do is to change config's value
     # so we know we are running as a worker.
     config.parallel_worker = True
+    with open(f"run/worker{i}.log", "w") as f:
+        print(f"PYTEST_PARALLEL: Worker {i} starts", file=f)
 
-    with open(os.devnull, "w") as devnull:
-        # Replace the TerminalWriter of terminalreporter with one that outputs
-        # to /dev/null.
-        reporter = config.pluginmanager.get_plugin("terminalreporter")
-        reporter._tw = _pytest.config.create_terminal_writer(config, devnull)
+        with open(os.devnull, "w") as devnull:
+            # Replace the TerminalWriter of terminalreporter with one that outputs
+            # to /dev/null.
+            reporter = config.pluginmanager.get_plugin("terminalreporter")
+            reporter._tw = _pytest.config.create_terminal_writer(config, devnull)
 
-        if tests_per_worker == 1:
-            worker_run(current_process().name, queue, session, errors)
-        else:
-            threads = []
-            for _ in range(tests_per_worker):
-                thread = ThreadWorker(queue, session, errors)
-                thread.start()
-                threads.append(thread)
-            [t.join() for t in threads]
+            if tests_per_worker == 1:
+                worker_run(current_process().name, queue, session, errors)
+            else:
+                threads = []
+                for _ in range(tests_per_worker):
+                    thread = ThreadWorker(queue, session, errors)
+                    thread.start()
+                    threads.append(thread)
+                [t.join() for t in threads]
 
+            print(f"PYTEST_PARALLEL: Worker {i} stops", file=f)
 
 def worker_run(name, queue, session, errors):
     pickling_support.install()
@@ -123,6 +126,11 @@ def pytest_configure(config):
     if not config.option.collectonly and (workers or tests_per_worker):
         config.pluginmanager.register(ParallelRunner(config), 'parallelrunner')
 
+    # devnull = open(os.devnull, "w")
+    # # Replace the TerminalWriter of terminalreporter with one that outputs
+    # # to /dev/null.
+    # reporter = config.pluginmanager.get_plugin("terminalreporter")
+    # reporter._tw = _pytest.config.create_terminal_writer(config, devnull)
 
 class ThreadLocalEnviron(os._Environ):
     def __init__(self, env):
@@ -249,12 +257,12 @@ class ParallelRunner(object):
         if session.config.option.collectonly:
             return True
         
-        # Override the number of workers based on the number of tests being
-        # executed if it is less than what was originally configured. This
-        # is a speculative fix to avoid pytest from hanging when more workers
-        # are spawned than is needed by the number of tests being executed.
-        if self.workers > len(session.items):
-            self.workers = len(session.items)
+        # # Override the number of workers based on the number of tests being
+        # # executed if it is less than what was originally configured. This
+        # # is a speculative fix to avoid pytest from hanging when more workers
+        # # are spawned than is needed by the number of tests being executed.
+        # if self.workers > len(session.items):
+        #     self.workers = len(session.items)
 
         # get the number of tests per worker
         tests_per_worker = parse_config(session.config, 'tests_per_worker')
@@ -304,13 +312,6 @@ class ParallelRunner(object):
         for i in range(self.workers * tests_per_worker):
             queue.put('stop')
 
-        responses_processor = threading.Thread(
-            target=self.process_responses,
-            args=(self.responses_queue,),
-        )
-        responses_processor.daemon = True
-        responses_processor.start()
-
         def wait_for_responses_processor():
             self.responses_queue.put(('quit', {}))
             responses_processor.join()
@@ -321,13 +322,23 @@ class ParallelRunner(object):
         # This flag will be changed after the worker's fork.
         self._config.parallel_worker = False
 
-        args = (self._config, queue, session, tests_per_worker, errors)
-        for _ in range(self.workers):
-            process = Process(target=process_with_threads, args=args)
+        for i in range(self.workers):
+            process = Process(target=process_with_threads,
+                              args=(self._config, queue, session, tests_per_worker, errors, i))
             process.start()
             processes.append(process)
 
-        [p.join() for p in processes]
+        responses_processor = threading.Thread(
+            target=self.process_responses,
+            args=(self.responses_queue,),
+        )
+        responses_processor.daemon = True
+        responses_processor.start()
+
+        for i, p in enumerate(processes):
+            print(f"PYTEST_PARALLEL: Join {i} process")
+            p.join()
+        print("PYTEST_PARALLEL: Joined all processes")
 
         wait_for_responses_processor()
 

@@ -304,17 +304,6 @@ class ParallelRunner(object):
         for i in range(self.workers * tests_per_worker):
             queue.put('stop')
 
-        responses_processor = threading.Thread(
-            target=self.process_responses,
-            args=(self.responses_queue,),
-        )
-        responses_processor.daemon = True
-        responses_processor.start()
-
-        def wait_for_responses_processor():
-            self.responses_queue.put(('quit', {}))
-            responses_processor.join()
-
         processes = []
 
         # Current process is not a worker.
@@ -327,9 +316,20 @@ class ParallelRunner(object):
             process.start()
             processes.append(process)
 
-        [p.join() for p in processes]
+        # Start the response processing thread. This must happen AFTER spawning
+        # the subprocesses as forking a multithreaded application is not safe
+        # and can result in deadlocks.
+        responses_processor = threading.Thread(
+            target=self.process_responses,
+            args=(self.responses_queue,),
+        )
+        responses_processor.daemon = True
+        responses_processor.start()
 
-        wait_for_responses_processor()
+        # Wait for completion.
+        [p.join() for p in processes]
+        self.responses_queue.put(('quit', {}))
+        responses_processor.join()
 
         if not errors.empty():
             import six

@@ -23,6 +23,9 @@ if sys.platform.startswith('darwin'):
 
 __version__ = '0.1.1'
 
+# We monkey-patch the standard library to make these environment variables thread-local.
+THREAD_LOCAL_ENV_VARS = ["PYTEST_CURRENT_TEST"]
+
 
 def parse_config(config, name):
     return getattr(config.option, name, config.getini(name))
@@ -152,7 +155,7 @@ class ThreadLocalEnviron(os._Environ):
             self.thread_store = threading.local()
 
     def __getitem__(self, key):
-        if key == 'PYTEST_CURRENT_TEST':
+        if key in THREAD_LOCAL_ENV_VARS:
             if hasattr(self.thread_store, key):
                 value = getattr(self.thread_store, key)
                 return self.decodevalue(value)
@@ -161,7 +164,7 @@ class ThreadLocalEnviron(os._Environ):
         return super().__getitem__(key)
 
     def __setitem__(self, key, value):
-        if key == 'PYTEST_CURRENT_TEST':
+        if key in THREAD_LOCAL_ENV_VARS:
             value = self.encodevalue(value)
             self.putenv(self.encodekey(key), value)
             setattr(self.thread_store, key, value)
@@ -169,7 +172,7 @@ class ThreadLocalEnviron(os._Environ):
             super().__setitem__(key, value)
 
     def __delitem__(self, key):
-        if key == 'PYTEST_CURRENT_TEST':
+        if key in THREAD_LOCAL_ENV_VARS:
             self.unsetenv(self.encodekey(key))
             if hasattr(self.thread_store, key):
                 delattr(self.thread_store, key)
@@ -179,8 +182,9 @@ class ThreadLocalEnviron(os._Environ):
             super().__delitem__(key)
 
     def __iter__(self):
-        if hasattr(self.thread_store, 'PYTEST_CURRENT_TEST'):
-            yield 'PYTEST_CURRENT_TEST'
+        for key in THREAD_LOCAL_ENV_VARS:
+            if hasattr(self.thread_store, key):
+                yield key
         keys = list(self._data)
         for key in keys:
             yield self.decodekey(key)

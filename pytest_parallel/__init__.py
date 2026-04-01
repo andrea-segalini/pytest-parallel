@@ -196,6 +196,30 @@ class ThreadLocalEnviron(os._Environ):
         return type(self)(self)
 
 
+class EnvironPropagatingThread(threading.Thread):
+    def start(self):
+        # Things we put in thread-local storage will fail to propagate to child
+        # threads, so do that manually here.
+        saved = {}
+        for key in THREAD_LOCAL_ENV_VARS:
+            if key in os.environ:
+                saved[key] = os.environ[key]
+
+        # Python (currently) specifies that start() can only be called once, but
+        # let's avoid recursively wrapping the original run() anyway.
+        if not hasattr(self, '__original_run'):
+            self.__original_run = self.run
+
+        def run():
+            for key, value in saved.items():
+                os.environ[key] = value
+            self.__original_run()
+
+        self.run = run
+
+        super().start()
+
+
 class ThreadLocalSetupState(threading.local, _pytest.runner.SetupState):
     def __init__(self):
         super(ThreadLocalSetupState, self).__init__()
@@ -240,6 +264,9 @@ class ParallelRunner(object):
         # make the environment threadsafe
         os.environ = ThreadLocalEnviron(os.environ)
 
+        # ...but don't break environment propagation to any threads spawned by the tests themselves.
+        threading.Thread = EnvironPropagatingThread
+
     def pytest_runtestloop(self, session):
         if (
             session.testsfailed
@@ -252,7 +279,7 @@ class ParallelRunner(object):
 
         if session.config.option.collectonly:
             return True
-        
+
         # Override the number of workers based on the number of tests being
         # executed if it is less than what was originally configured. This
         # is a speculative fix to avoid pytest from hanging when more workers

@@ -8,8 +8,11 @@ import _pytest
 import platform
 import threading
 import multiprocessing
+import queue as queue_module
 from tblib import pickling_support
 from multiprocessing import current_process, Manager, Process
+
+from . import hookspec as _parallel_hookspec
 
 # In Python 3.8 and later, the default on macOS is spawn.
 # We force forking behavior at the expense of safety.
@@ -25,6 +28,18 @@ __version__ = '0.1.1'
 
 # We monkey-patch the standard library to make these environment variables thread-local.
 THREAD_LOCAL_ENV_VARS = ["PYTEST_CURRENT_TEST"]
+
+# How long a worker blocks on the test queue before re-checking the
+# pytest_parallel_should_stop hook. Kept small so callers get a responsive
+# shutdown, but not so small that idle workers eat CPU.
+WORKER_POLL_INTERVAL_SEC = 0.1
+
+
+def pytest_addhooks(pluginmanager):
+    """
+    Register pytest-parallel's own hook specifications.
+    """
+    pluginmanager.add_hookspecs(_parallel_hookspec)
 
 
 def parse_config(config, name):
@@ -82,17 +97,38 @@ def process_with_threads(config, queue, session, tests_per_worker, errors):
             [t.join() for t in threads]
 
 
+def _should_stop(session):
+    """
+    Invoke the `pytest_parallel_should_stop` hook, swallowing errors.
+
+    A misbehaving hook implementation should not be able to take down a
+    worker, so any exception is treated effectively as "don't stop".
+    """
+    try:
+        return bool(
+            session.config.hook.pytest_parallel_should_stop(session=session)
+        )
+    except BaseException:
+        return False
+
+
 def worker_run(name, queue, session, errors):
     pickling_support.install()
     while True:
         try:
-            index = queue.get()
-            if index == 'stop':
-                queue.task_done()
+            index = queue.get(timeout=WORKER_POLL_INTERVAL_SEC)
+        except queue_module.Empty:
+            # No work available right now. Give other plugins a chance to
+            # cancel the run, then keep polling.
+            if _should_stop(session):
                 break
-        except ConnectionRefusedError:
-            time.sleep(.1)
             continue
+        except ConnectionRefusedError:
+            time.sleep(WORKER_POLL_INTERVAL_SEC)
+            continue
+        if index == 'stop':
+            queue.task_done()
+            break
         item = session.items[index]
         try:
             run_test(session, item, None)
@@ -106,6 +142,12 @@ def worker_run(name, queue, session, errors):
                 queue.task_done()
             except ConnectionRefusedError:
                 pass
+        # Stop check is outside the `finally` block on purpose: PEP 765 flags
+        # `break` inside `finally` because it silently suppresses any in-flight
+        # exception. Running this check after the finally completes keeps the
+        # normal shutdown path and lets real exceptions propagate unchanged.
+        if _should_stop(session):
+            break
 
 
 class ThreadWorker(threading.Thread):

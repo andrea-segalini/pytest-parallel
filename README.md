@@ -57,6 +57,48 @@ pytest --tests-per-worker auto
 pytest --workers 2 --tests-per-worker auto
 ```
 
+## Stopping a parallel run early
+
+`pytest-parallel` exposes a hook that lets other plugins or `conftest.py` tell
+workers to stop picking up new tests:
+
+```python
+@pytest.hookspec(firstresult=True)
+def pytest_parallel_should_stop(session):
+    """Return True to stop workers from picking up new tests."""
+```
+
+Each worker polls the hook:
+
+* after every test completes, and
+* whenever the test queue is idle.
+
+The first registered implementation that returns a non-`None` value wins.
+Return `True` to stop, `False` to keep running, or `None` to defer to other
+implementations. If no implementation is registered, or if every implementation
+returns `None`, workers keep running as usual.
+
+### Example hook implementation
+
+```python
+def pytest_parallel_should_stop(session):
+    if session_should_be_aborted(session):
+        return True
+    return None  # let other implementations decide
+```
+
+### Caveats
+
+- Each worker runs in its own subprocess with its own copy of `session`.
+  Implementations should rely on state visible from inside a worker process:
+  shared `multiprocessing` primitives, files on disk, or the worker-local
+  `session` state that pytest mutates in response to per-test reports.
+* `pytest-parallel` does **not** observe pytest's built-in `session.shouldstop`
+  or `session.shouldfail` flags across workers. There is currently no channel
+  to propagate those signals from the master to the workers, so flags set by
+  features like `--maxfail` are not enforced across workers. Plugins that want
+  cross-worker stop semantics must implement this hook themselves.
+
 ## Notice
 
 Beginning with Python 3.8, forking behavior is forced on macOS at the expense of safety.

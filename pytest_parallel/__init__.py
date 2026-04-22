@@ -8,6 +8,7 @@ import _pytest
 import platform
 import threading
 import multiprocessing
+import queue as queue_module
 from tblib import pickling_support
 from multiprocessing import current_process, Manager, Process
 
@@ -25,6 +26,9 @@ __version__ = '0.1.1'
 
 # We monkey-patch the standard library to make these environment variables thread-local.
 THREAD_LOCAL_ENV_VARS = ["PYTEST_CURRENT_TEST"]
+
+# Sentinel value for stopping the worker.
+STOP_SENTINEL = 'stop'
 
 
 def parse_config(config, name):
@@ -59,6 +63,49 @@ def run_test(session, item, nextitem):
         raise session.Interrupted(session.shouldstop)
 
 
+def _drain_test_queue(queue):
+    """
+    Drain pending test indices from `queue`, preserving 'stop' sentinels.
+
+    Used by master when pytest has decided the session should stop (e.g.
+    `--maxfail` has been tripped) so that workers still blocked on
+    `queue.get()` will next receive a sentinel and exit cleanly. Any tests
+    already in-flight in a worker will run to completion; only the untouched
+    backlog is discarded.
+
+    :param queue: The queue to drain.
+    :return: The number of test indices that were dropped.
+    """
+    dropped = 0
+    stashed_sentinels = 0
+    while True:
+        try:
+            item = queue.get_nowait()
+        except queue_module.Empty:
+            break
+        except ConnectionRefusedError:
+            break
+
+        if item == STOP_SENTINEL:
+            stashed_sentinels += 1
+        else:
+            dropped += 1
+        try:
+            queue.task_done()
+        except ConnectionRefusedError:
+            pass
+
+    # Put the sentinels back so workers that are still blocked on `get()` will
+    # see one and exit. Workers that are already past `get()` (running a test)
+    # will pick a sentinel up on their next iteration.
+    for _ in range(stashed_sentinels):
+        try:
+            queue.put(STOP_SENTINEL)
+        except ConnectionRefusedError:
+            pass
+    return dropped
+
+
 def process_with_threads(config, queue, session, tests_per_worker, errors):
     # This function will be called from subprocesses, forked from the main
     # pytest process. First thing we need to do is to change config's value
@@ -87,7 +134,7 @@ def worker_run(name, queue, session, errors):
     while True:
         try:
             index = queue.get()
-            if index == 'stop':
+            if index == STOP_SENTINEL:
                 queue.task_done()
                 break
         except ConnectionRefusedError:
@@ -236,6 +283,11 @@ class ParallelRunner(object):
         self._manager = Manager()
         self._log = py.log.Producer('pytest-parallel')
 
+        # Populated in pytest_runtestloop once the session and queue are known.
+        self._session = None
+        self._queue = None
+        self._stop_requested = False
+
         # get the number of workers
         workers = parse_config(config, 'workers')
         try:
@@ -320,6 +372,12 @@ class ParallelRunner(object):
         queue = queue_cls()
         errors = queue_cls()
 
+        # Stashed for the response processor so it can drain the test queue
+        # when pytest signals `session.shouldstop` or `session.shouldfail`.
+        self._session = session
+        self._queue = queue
+        self._stop_requested = False
+
         # Reports about tests will be gathered from workerss
         # using this queue. Workers will push reports to the queue,
         # and a separate thread will rerun pytest_runtest_logreport
@@ -333,7 +391,7 @@ class ParallelRunner(object):
         # Now we need to put stopping sentinels, so that worker
         # processes will know, there is time to finish the work.
         for i in range(self.workers * tests_per_worker):
-            queue.put('stop')
+            queue.put(STOP_SENTINEL)
 
         processes = []
 
@@ -396,6 +454,37 @@ class ParallelRunner(object):
             config=self._config, data=report
         )
         self._config.hook.pytest_runtest_logreport(report=report)
+
+        # pytest mutates `session.shouldstop` or `session.shouldfail` during
+        # its own `pytest_runtest_logreport` handler (for example when
+        # `--maxfail` is tripped). Check immediately so that workers stop
+        # pulling from the queue as soon as pytest decides the session should
+        # stop.
+        self._check_for_stop()
+
+    def _check_for_stop(self):
+        """
+        Drain the remaining backlog if the master session wants to stop.
+
+        This is called from the response-processing thread after each test
+        report is dispatched. Repeated calls after the first successful drain
+        are no-ops.
+        """
+        if self._stop_requested:
+            return
+        session = self._session
+        if session is None:
+            return
+        if not (session.shouldstop or session.shouldfail):
+            return
+        self._stop_requested = True
+        reason = session.shouldstop or session.shouldfail
+        dropped = _drain_test_queue(self._queue)
+        if dropped:
+            self._log(
+                f"pytest-parallel: stopping early ({reason}); "
+                f"{dropped} pending test(s) will not be run"
+            )
 
     def process_responses(self, queue):
         while True:

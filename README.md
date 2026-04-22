@@ -57,6 +57,30 @@ pytest --tests-per-worker auto
 pytest --workers 2 --tests-per-worker auto
 ```
 
+## Early stopping
+
+This plugin honours the built-in session-stop flags supported by `pytest`
+(`session.shouldstop` and `session.shouldfail`) even when tests are running
+across multiple worker processes. The master process observes these flags after
+each worker test report is dispatched; once either flag is set, the remaining
+backlog is drained from the shared test queue so idle workers exit cleanly.
+Tests that were already running when the stop fires are allowed to finish,
+matching pytest's normal "interrupt" semantics.
+
+In practice, this means `--maxfail` works across workers. Note that slightly
+more tests than `--maxfail` specifies may still run: tests already executing
+when the stop fires are allowed to finish, and a small window exists between
+when pytest sets the stop flag and when the master drains the queue in which
+idle workers can still pick up pending tests.
+
+```bash
+# stop after the first failure, regardless of how many workers are running
+pytest --workers=4 --maxfail=1
+```
+
+Any other plugin or hook that sets `session.shouldstop` or
+`session.shouldfail` on the master session will trigger the same behaviour.
+
 ## Notice
 
 Beginning with Python 3.8, forking behavior is forced on macOS at the expense of safety.

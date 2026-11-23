@@ -12,14 +12,19 @@ import queue as queue_module
 from tblib import pickling_support
 from multiprocessing import current_process, Manager, Process
 
-# In Python 3.8 and later, the default on macOS is spawn.
-# We force forking behavior at the expense of safety.
+# In Python 3.8 and later, the default on macOS is spawn:
 #
 # "On macOS, the spawn start method is now the default. The fork start method should be
 #  considered unsafe as it can lead to crashes of the subprocess. See bpo-33725."
 #
 # https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
-if sys.platform.startswith('darwin'):
+#
+# In Python 3.14 and later, the default on Linux is forkserver, which requires
+# `Process` arguments to be pickle-able.
+#
+# Therefore, force forking behaviour at the expense of safety.
+#
+if sys.platform.startswith(('darwin', 'linux')):
     multiprocessing.set_start_method('fork')
 
 __version__ = '0.1.1'
